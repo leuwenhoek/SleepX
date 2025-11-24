@@ -137,6 +137,14 @@ current_state = None
 current_state_start = None
 # ===============================================
 
+# --- NEW: Emergency email variables ---
+email_mode = False
+email_input = ""
+email_counter = 0
+EMERGENCY_FILE = os.path.join("JSON", "emergency_contacts.json")
+emergency_emails = []  # List to store multiple emails
+# -----------------------------------------------
+
 def clear_terminal():
     """Clear terminal screen based on OS"""
     system_name = platform.system()
@@ -451,11 +459,69 @@ def truncate_text(text, max_length):
         return text
     return text[:max_length-3] + "..."
 
+# --- NEW: Load/save emergency emails ---
+def load_emergency_emails():
+    global emergency_emails
+    try:
+        if os.path.exists(EMERGENCY_FILE):
+            with open(EMERGENCY_FILE, "r") as f:
+                data = json.load(f)
+                emergency_emails = data.get("emails", []) if isinstance(data, dict) else []
+                print_with_counter(f"Loaded {len(emergency_emails)} emergency email(s)")
+        else:
+            emergency_emails = []
+    except Exception as e:
+        print_with_counter(f"Error loading emergency emails: {e}")
+        emergency_emails = []
+
+def save_emergency_emails():
+    try:
+        payload = {
+            "emails": emergency_emails,
+            "last_updated": datetime.now().isoformat()
+        }
+        with open(EMERGENCY_FILE, "w") as f:
+            json.dump(payload, f, indent=2)
+        print_with_counter(f"Saved {len(emergency_emails)} emergency email(s)")
+    except Exception as e:
+        print_with_counter(f"Error saving emergency emails: {e}")
+
+def add_emergency_email(email: str):
+    global emergency_emails
+    email = email.strip()
+    if email not in emergency_emails:
+        emergency_emails.append(email)
+        save_emergency_emails()
+        print_with_counter(f"Added emergency email: {email}")
+        return True
+    else:
+        print_with_counter(f"Email already exists: {email}")
+        return False
+
+def remove_emergency_email(email: str):
+    global emergency_emails
+    email = email.strip()
+    if email in emergency_emails:
+        emergency_emails.remove(email)
+        save_emergency_emails()
+        print_with_counter(f"Removed emergency email: {email}")
+        return True
+    return False
+# -----------------------------------------------
+
 def handle_mouse_click(event, x, y, flags, param):
     global current_threshold, input_mode, input_text, naming_mode, name_input
     global threshold_menu_open, edit_mode, edit_threshold_name, edit_input
-    global current_threshold_name, recently_used  # ADDED
-    
+    global current_threshold_name, recently_used
+    global email_mode, email_input, emergency_emails
+
+    if event != cv2.EVENT_LBUTTONDOWN:
+        return
+
+    # Debug log
+    if event == cv2.EVENT_LBUTTONDOWN:
+        print_with_counter(f"Mouse click at: ({x}, {y})")
+
     if event != cv2.EVENT_LBUTTONDOWN:
         return
 
@@ -467,7 +533,6 @@ def handle_mouse_click(event, x, y, flags, param):
                     threshold_menu_open = False
                     return
                 elif button_type == 'threshold':
-                    # Apply selected threshold
                     current_threshold = float(button_data['value'])
                     current_threshold_name = button_data['name']
                     add_to_recently_used(button_data)
@@ -487,10 +552,10 @@ def handle_mouse_click(event, x, y, flags, param):
     
     # Handle edit mode input confirmation
     if edit_mode:
-        return  # Handled in keyboard input
-        
+        return
+
     # Check if any button was clicked when menus are not open
-    if not input_mode and not naming_mode:
+    if not input_mode and not naming_mode and not email_mode:
         # Check increase button
         inc_btn = param['inc_btn']
         if inc_btn[0] <= x <= inc_btn[2] and inc_btn[1] <= y <= inc_btn[3]:
@@ -503,13 +568,13 @@ def handle_mouse_click(event, x, y, flags, param):
         dec_btn = param['dec_btn']
         if dec_btn[0] <= x <= dec_btn[2] and dec_btn[1] <= y <= dec_btn[3]:
             current_threshold -= 0.01
-            current_threshold = max(0.01, round(current_threshold, 2))  # Prevent negative threshold
+            current_threshold = max(0.01, round(current_threshold, 2))
             print_with_counter(f"Threshold decreased to: {current_threshold}")
             return
             
         # Check custom input button
         input_btn = param['input_btn']
-        if input_btn[0] <= x <= input_btn[2] and input_btn[1] <= y <= input_btn[3]:  # Changed inc_btn to input_btn
+        if input_btn[0] <= x <= input_btn[2] and input_btn[1] <= y <= input_btn[3]:
             input_mode = True
             input_text = ""
             print_with_counter("Custom threshold input mode: active")
@@ -525,46 +590,54 @@ def handle_mouse_click(event, x, y, flags, param):
             
         # Check load button
         load_btn = param['load_btn']
-        if load_btn[0] <= x <= load_btn[2] and load_btn[1] <= y <= load_btn[3]:  # FIXED
+        if load_btn[0] <= x <= load_btn[2] and load_btn[1] <= y <= load_btn[3]:
             threshold_menu_open = True
             print_with_counter("Opening threshold selection menu")
             return
 
+        # --- NEW: Check emergency email button ---
+        email_btn = param.get('email_btn')
+        if email_btn and email_btn[0] <= x <= email_btn[2] and email_btn[1] <= y <= email_btn[3]:
+            email_mode = True
+            email_input = ""
+            print_with_counter("Emergency email input mode: active")
+            return
+        # -----------------------------------------------
+
+# ...existing code...
+
 def handle_keyboard_input(key):
-    """Handle keyboard input for custom threshold, naming, and editing"""
+    """Handle keyboard input for custom threshold, naming, editing, and emails"""
     global input_text, input_mode, current_threshold, naming_mode, name_input
     global threshold_menu_open, edit_mode, edit_input, edit_threshold_name
+    global email_mode, email_input, emergency_emails
     
     # Close threshold menu with Escape
-    if threshold_menu_open and key == 27:  # Escape key
+    if threshold_menu_open and key == 27:
         threshold_menu_open = False
         return
     
     # Process edit mode
     if edit_mode:
-        # Confirm edit with Enter
-        if key == 13:  # Enter key
+        if key == 13:
             edit_threshold(edit_threshold_name, edit_input)
             edit_mode = False
             edit_input = ""
             edit_threshold_name = ""
             return
         
-        # Backspace
-        if key == 8:  # Backspace key
+        if key == 8:
             edit_input = edit_input[:-1]
             return
             
-        # Escape to cancel
-        if key == 27:  # Escape key
+        if key == 27:
             edit_mode = False
             edit_input = ""
             edit_threshold_name = ""
             print_with_counter("Edit cancelled")
             return
             
-        # Add character if valid (numbers and decimal)
-        if 48 <= key <= 57 or key == 46:  # Numbers or decimal point
+        if 48 <= key <= 57 or key == 46:
             char = chr(key)
             if char == '.' and '.' in edit_input:
                 return
@@ -573,11 +646,10 @@ def handle_keyboard_input(key):
     
     # Process input mode
     if input_mode:
-        # Confirm input with Enter
-        if key == 13:  # Enter key
+        if key == 13:
             try:
                 value = float(input_text)
-                if 0 < value < 1:  # Reasonable threshold range
+                if 0 < value < 1:
                     current_threshold = round(value, 2)
                     print_with_counter(f"Threshold set to custom value: {current_threshold}")
                 else:
@@ -589,21 +661,17 @@ def handle_keyboard_input(key):
             input_text = ""
             return
         
-        # Backspace
-        if key == 8:  # Backspace key
+        if key == 8:
             input_text = input_text[:-1]
             return
             
-        # Escape to cancel
-        if key == 27:  # Escape key
+        if key == 27:
             input_mode = False
             input_text = ""
             return
             
-        # Add character if valid
-        if 48 <= key <= 57 or key == 46:  # Numbers or decimal point
+        if 48 <= key <= 57 or key == 46:
             char = chr(key)
-            # Allow only one decimal point
             if char == '.' and '.' in input_text:
                 return
             input_text += char
@@ -611,8 +679,7 @@ def handle_keyboard_input(key):
     
     # Process naming mode
     if naming_mode:
-        # Confirm name with Enter
-        if key == 13:  # Enter key
+        if key == 13:
             if name_input.strip():
                 save_current_threshold(name_input.strip())
             else:
@@ -622,22 +689,54 @@ def handle_keyboard_input(key):
             name_input = ""
             return
         
-        # Backspace
-        if key == 8:  # Backspace key
+        if key == 8:
             name_input = name_input[:-1]
             return
             
-        # Escape to cancel
-        if key == 27:  # Escape key
+        if key == 27:
             naming_mode = False
             name_input = ""
             print_with_counter("Threshold naming cancelled")
             return
             
-        # Add character if valid (allow letters, numbers, spaces, hyphens, underscores)
-        if (32 <= key <= 126) and len(name_input) < 20:  # Printable ASCII with length limit
+        if (32 <= key <= 126) and len(name_input) < 20:
             name_input += chr(key)
             return
+
+    # --- NEW: Process emergency email input mode ---
+    if email_mode:
+        # Confirm with Enter
+        if key == 13:
+            candidate = email_input.strip()
+            if "@" in candidate and "." in candidate and len(candidate) > 5:
+                if add_emergency_email(candidate):
+                    email_input = ""
+                    print_with_counter("Email added! Press Enter again to add more, Esc to finish")
+                else:
+                    email_input = ""
+                    print_with_counter("Email already exists. Try another one")
+            else:
+                print_with_counter("Invalid email format. Use example@domain.com")
+                email_input = ""
+            return
+
+        # Backspace
+        if key == 8:
+            email_input = email_input[:-1]
+            return
+
+        # Escape to finish
+        if key == 27:
+            email_mode = False
+            email_input = ""
+            print_with_counter(f"Email input finished. Total emails: {len(emergency_emails)}")
+            return
+
+        # Accept printable characters
+        if 32 <= key <= 126 and len(email_input) < 64:
+            email_input += chr(key)
+            return
+    # -----------------------------------------------
 
 def update_sleep_percentage(state):
     """Update sleep percentage based on current state"""
@@ -710,6 +809,9 @@ def main():
 
     # Load saved thresholds
     load_thresholds()
+    # --- NEW: Load emergency emails ---
+    load_emergency_emails()
+    # --------------------------------
     
     # Initialize webcam
     video_capture = cv2.VideoCapture(0)
@@ -724,20 +826,21 @@ def main():
     print_with_counter("- Terminal will auto-clear after 50 messages")
     print_with_counter("- Press 'q' to quit the application")
     print_with_counter(f"- Loaded {len(saved_thresholds)} saved thresholds")
+    print_with_counter(f"- Loaded {len(emergency_emails)} emergency email(s)")
 
     # Create named window and set mouse callback
     cv2.namedWindow('Real-Time Eye State Detection')
     button_params = {'inc_btn': None, 'dec_btn': None, 'input_btn': None, 
-                   'save_btn': None, 'load_btn': None, 'menu_buttons': []}
+                   'save_btn': None, 'load_btn': None, 'menu_buttons': [], 'email_btn': None}
     cv2.setMouseCallback('Real-Time Eye State Detection', handle_mouse_click, button_params)
 
     # Add these globals if not already present
     global input_text, input_counter, input_mode, naming_mode, name_input, name_counter
     global edit_mode, edit_threshold_name, edit_input, edit_counter, threshold_menu_open
-    global edit_mode, edit_threshold_name, edit_input, edit_counter
     global sleep, drowsy, active, status, color, box_color
     global blink_duration, total_blinks, last_blink_time, blink_frequency
     global microsleep_counter, session_start_time, head_pose_angles
+    global email_mode, email_input, email_counter
     edit_mode = False
     edit_threshold_name = ""
     edit_input = ""
@@ -771,12 +874,19 @@ def main():
             input_btn = draw_button(frame, "Custom", (190, frame.shape[0] - 50), btn_width, btn_height)
             save_btn = draw_button(frame, "Save", (280, frame.shape[0] - 50), btn_width, btn_height)
             load_btn = draw_button(frame, "Load", (370, frame.shape[0] - 50), btn_width, btn_height)
+            # --- NEW: Email button ---
+            email_btn = draw_button(frame, "Email", (460, frame.shape[0] - 50), btn_width, btn_height)
+            # ---------------------------
 
             button_params['inc_btn'] = inc_btn
             button_params['dec_btn'] = dec_btn
             button_params['input_btn'] = input_btn
             button_params['save_btn'] = save_btn
             button_params['load_btn'] = load_btn
+            button_params['email_btn'] = email_btn
+            
+            # Re-register callback each frame to ensure updated params
+            cv2.setMouseCallback('Real-Time Eye State Detection', handle_mouse_click, button_params)
             
             # Draw custom input field if active
             if input_mode:
@@ -868,18 +978,60 @@ def main():
                           (frame.shape[1]//2 - 140, frame.shape[0]//2 + 50), 
                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
+            # --- NEW: Draw email input field if active ---
+            elif email_mode:
+                overlay = frame.copy()
+                cv2.rectangle(overlay, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 0), -1)
+                cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+                
+                cv2.rectangle(frame, (frame.shape[1]//2 - 220, frame.shape[0]//2 - 80),
+                             (frame.shape[1]//2 + 220, frame.shape[0]//2 + 80),
+                             (255, 255, 255), -1)
+                cv2.rectangle(frame, (frame.shape[1]//2 - 220, frame.shape[0]//2 - 80),
+                             (frame.shape[1]//2 + 220, frame.shape[0]//2 + 80),
+                             (0, 0, 0), 2)
+                
+                cv2.putText(frame, "Enter emergency email:",
+                            (frame.shape[1]//2 - 180, frame.shape[0]//2 - 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+                
+                display_email = email_input
+                email_counter = (email_counter + 1) % 30
+                if email_counter < 15:
+                    display_email += "|"
+                
+                cv2.putText(frame, display_email,
+                            (frame.shape[1]//2 - 200, frame.shape[0]//2 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+                
+                cv2.putText(frame, f"Total: {len(emergency_emails)} email(s)",
+                            (frame.shape[1]//2 - 200, frame.shape[0]//2 + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 50, 50), 1)
+                
+                cv2.putText(frame, "Enter to add, Esc to finish",
+                            (frame.shape[1]//2 - 180, frame.shape[0]//2 + 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            # -----------------------------------------------
+            
             # Draw threshold selection menu if open
             elif threshold_menu_open:
                 menu_buttons = draw_threshold_menu(frame)
                 button_params['menu_buttons'] = menu_buttons
             else:
-                button_params['menu_buttons'] = []  # Clear menu buttons when menu is closed
+                button_params['menu_buttons'] = []
             
             # Display current threshold info
             threshold_text = f"Threshold: {current_threshold} ({truncate_text(current_threshold_name, 15)})"
             cv2.putText(frame, threshold_text, 
                       (10, frame.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 
                       0.6, (0, 0, 0), 2)
+            
+            # --- NEW: Display emergency emails on screen ---
+            email_display = f"{len(emergency_emails)} email(s)"
+            cv2.putText(frame, f"Emergency E-Mails: {email_display}",
+                      (10, frame.shape[0] - 90), cv2.FONT_HERSHEY_SIMPLEX,
+                      0.5, (0, 0, 0), 1)
+            # -----------------------------------------------
             
             # Display sleepiness percentage
             percentage_color = (0, 255, 0) if sleep_percentage < 30 else (0, 165, 255) if sleep_percentage < 60 else (0, 0, 255)
@@ -903,10 +1055,10 @@ def main():
                     
                     # Calculate bounding box coordinates with padding
                     padding = 20
-                    x_min = max(0, int(np.min(face_points[:, 0])) - padding)  # Add closing parenthesis
-                    y_min = max(0, int(np.min(face_points[:, 1])) - padding)  # Add closing parenthesis
-                    x_max = min(w, int(np.max(face_points[:, 0])) + padding)  # Add closing parenthesis
-                    y_max = min(h, int(np.max(face_points[:, 1])) + padding)  # Add closing parenthesis
+                    x_min = max(0, int(np.min(face_points[:, 0])) - padding)
+                    y_min = max(0, int(np.min(face_points[:, 1])) - padding)
+                    x_max = min(w, int(np.max(face_points[:, 0])) + padding)
+                    y_max = min(h, int(np.max(face_points[:, 1])) + padding)
                     
                     # Extract eye coordinates
                     left_eye = np.array([(face_landmarks.landmark[i].x * w, face_landmarks.landmark[i].y * h) 
@@ -927,12 +1079,12 @@ def main():
                     is_eye_closed = ear < current_threshold
                     if is_eye_closed:
                         blink_duration += 1
-                        if blink_duration == 1:  # Start of blink
-                            if current_time - last_blink_time > 0.5:  # Valid blink (not continuation)
+                        if blink_duration == 1:
+                            if current_time - last_blink_time > 0.5:
                                 total_blinks += 1
                                 last_blink_time = current_time
                     else:
-                        if blink_duration > 0:  # End of blink
+                        if blink_duration > 0:
                             if blink_duration > MICROSLEEP_FRAMES:
                                 microsleep_counter += 1
                                 print_with_counter(f"Microsleep detected! Duration: {blink_duration} frames")
@@ -971,16 +1123,16 @@ def main():
                             color = (0, 255, 0)
                             box_color = (0, 255, 0)
 
-                    # ===== UPDATE STATE HISTORY ONLY ON CHANGE =====
+                    # Update state history on change
                     if status and old_status != status:
                         print_with_counter(f"Status changed to: {status} (EAR: {ear:.2f})")
                         update_state_history(status)
 
-                    # 1. Update sleep percentage based on the new status
-                    update_sleep_percentage(status) # Ensure percentage is fresh
+                    # Update sleep percentage
+                    update_sleep_percentage(status)
                     
-                    # 2. Now write the current status AND the calculated percentage to JSON
-                    write_vehicle_status(status, sleep_percentage) # <--- UPDATED CALL
+                    # Write vehicle status with percentage
+                    write_vehicle_status(status, sleep_percentage)
                     
                     # Alert when sleepiness is high
                     if sleep_percentage > 50 and sleep_percentage % 10 < 0.1:
@@ -995,13 +1147,10 @@ def main():
                     cv2.putText(frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3)
                     
             else:
-                # Print message if no face is detected
                 cv2.putText(frame, "No face detected", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                
-                # Reset counters =when no face
                 sleep = drowsy = active = 0
                 status = ""
-                blink_duration = 0  # Reset blink duration
+                blink_duration = 0
 
             # Display frame
             cv2.imshow('Real-Time Eye State Detection', frame)
@@ -1019,7 +1168,7 @@ def main():
                 break
 
     finally:
-        # ===== NEW: Finalize state history =====
+        # Finalize state history
         if current_state is not None:
             current_time = datetime.now()
             duration = (current_time - current_state_start).total_seconds()
@@ -1030,7 +1179,6 @@ def main():
                 "duration": duration
             })
             save_state_history()
-        # ======================================
         
         # Session summary
         session_duration = time.time() - session_start_time
@@ -1104,7 +1252,7 @@ def main():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Drowsiness Detection Session Summary</title>
+    <title>SleepX</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&family=Anton:wght@400&display=swap" rel="stylesheet">
@@ -1390,7 +1538,7 @@ def main():
 <body>
     <div class="container">
         <header>
-            <h1>DROWSINESS DETECTION SUMMARY</h1>
+            <h1>SleepX summary</h1>
             <p class="subtitle">Detailed analysis of your activity and sleep patterns during the session</p>
         </header>
         
