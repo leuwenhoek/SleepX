@@ -8,9 +8,10 @@ def run_sleep_detector():
 def run_app():
     os.system("python .\web\\app.py")
 
-def run_display():
-    # Remember to include your port argument!
-    os.system("python .\IoT\display.py")
+# def run_IOT(cmd):
+#     # Remember to include your port argument!
+#     os.system(cmd)
+
 
 if __name__ == '__main__':
     print("Starting all components in the same terminal...")
@@ -18,15 +19,15 @@ if __name__ == '__main__':
     # 1. Start the processes
     p1 = multiprocessing.Process(target=run_sleep_detector)
     p2 = multiprocessing.Process(target=run_app)
-    p3 = multiprocessing.Process(target=run_display)
+    # IOT_process = multiprocessing.Process(target=run_IOT("python .\IoT\\display.py"))
 
     p1.start()
     p2.start()
-    p3.start()
+    # IoT.start()
 
     # 2. Wait for all processes to finish (optional)
     p1.join()
     p2.join()
-    p3.join()
+    # IoT_process.join()
 
     print("All components shut down.")
