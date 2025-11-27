@@ -18,7 +18,41 @@ except Exception:
 # Serial connection vars
 _serial_conn = None
 ARDUINO_PORT = "COM3"     # <- change to your COM port
-ARDUINO_BAUD = 115200
+ARDUINO_BAUD = 9600
+
+# NEW: periodic Arduino sender control
+arduino_sender_running = False
+ARDUINO_SEND_INTERVAL = 1.0  # seconds (changed from 3.0)
+
+def _read_sleep_from_json():
+    """Return (letter_code, percentage) for this VEHICLE_INFO from JSON file."""
+    try:
+        if not os.path.exists(JSON_FILE_PATH):
+            return None, 0
+        with open(JSON_FILE_PATH, "r") as f:
+            data = json.load(f)
+        # support object or list
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            return None, 0
+        # find matching vehicle by id, else take first
+        entry = next((d for d in data if d.get("id") == VEHICLE_INFO.get("id")), (data[0] if data else None))
+        if not entry:
+            return None, 0
+        status = entry.get("status", "")
+        pct = entry.get("sleep_percentage", 0) or 0
+        # map status -> letter
+        status_map = {"SLEEPING !!!": "s", "Drowsy !": "d", "Active :)": "a"}
+        letter = status_map.get(status, "a")  # default to 'a' if unknown
+        try:
+            pct_int = int(round(float(pct)))
+        except Exception:
+            pct_int = 0
+        return letter, pct_int
+    except Exception as e:
+        print_with_counter(f"Error reading JSON for Arduino: {e}")
+        return None, 0
 
 # Initialize MediaPipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
@@ -77,6 +111,15 @@ def write_vehicle_status(state: str, percentage: float): # ADD 'percentage' argu
     with open(JSON_FILE_PATH, "w") as f:
         json.dump(data, f, indent=2)
 
+    # DEBUG: immediately send current letter+percentage to Arduino (non-blocking)
+    try:
+        status_map = {"SLEEPING !!!": "s", "Drowsy !": "d", "Active :)": "a"}
+        letter = status_map.get(state, "a")
+        pct_int = int(round(float(percentage))) if percentage is not None else 0
+        threading.Thread(target=send_to_arduino, args=(f"{letter}+{pct_int}",), daemon=True).start()
+    except Exception as _:
+        pass
+
 # Variables for tracking state
 sleep = drowsy = active = 0
 status = ""
@@ -129,6 +172,11 @@ sleep_percentage = 0
 sleep_history = []  # To keep track of recent states for percentage calculation
 MAX_HISTORY = 100  # Number of frames to consider for percentage
 
+# Emergency email list and input mode (used by keyboard input branch)
+emergency_emails = []
+email_mode = False
+email_input = ""
+
 # Terminal message counter and limit
 terminal_msg_count = 0
 TERMINAL_MSG_LIMIT = 50  # Clear terminal after this many messages
@@ -147,14 +195,6 @@ state_history = []
 current_state = None
 current_state_start = None
 # ===============================================
-
-# --- NEW: Emergency email variables ---
-email_mode = False
-email_input = ""
-email_counter = 0
-EMERGENCY_FILE = os.path.join("JSON", "emergency_contacts.json")
-emergency_emails = []  # List to store multiple emails
-# -----------------------------------------------
 
 def clear_terminal():
     """Clear terminal screen based on OS"""
@@ -201,11 +241,8 @@ def save_thresholds_to_file():
     try:
         with open(save_thresholds_file, 'w') as f:
             json.dump({'thresholds': saved_thresholds}, f, indent=2)
-        print_with_counter(f"Saved {len(saved_thresholds)} thresholds to file")
     except Exception as e:
-        print_with_counter(f"Error saving thresholds: {e}")
-
-# ===== NEW: Save state history =====
+        raise Exception("from line 236 : ",e)
 def save_state_history():
     """Save state history to JSON file"""
     try:
@@ -214,6 +251,45 @@ def save_state_history():
         print_with_counter("Saved state history to file")
     except Exception as e:
         print_with_counter(f"Error saving state history: {e}")
+
+def add_emergency_email(email):
+    """Add an emergency email to the list (returns True if added, False if duplicate/invalid)."""
+    global emergency_emails
+    try:
+        if not email:
+            print_with_counter("Empty email not allowed")
+            return False
+        candidate = email.strip()
+        # Basic validation
+        if "@" not in candidate or "." not in candidate or len(candidate) < 5:
+            print_with_counter("Invalid email format. Use example@domain.com")
+            return False
+        candidate = candidate.lower()
+        if candidate in emergency_emails:
+            print_with_counter("Email already exists")
+            return False
+
+        emergency_emails.append(candidate)
+
+        # Save list to JSON for persistence
+        try:
+            os.makedirs("JSON", exist_ok=True)
+            path = os.path.join("JSON", "emergency_emails.json")
+            with open(path, "w") as f:
+                json.dump({"emails": emergency_emails}, f, indent=2)
+            print_with_counter(f"Added emergency email: {candidate}")
+        except Exception as e:
+            print_with_counter(f"Failed to save emergency emails: {e}")
+
+        return True
+    except Exception as e:
+        print_with_counter(f"Error adding emergency email: {e}")
+        return False
+# ===================================
+
+def add_to_recently_used(threshold_info):
+    """Add a threshold to recently used list"""
+    global recently_used
 # ===================================
 
 def add_to_recently_used(threshold_info):
@@ -470,61 +546,10 @@ def truncate_text(text, max_length):
         return text
     return text[:max_length-3] + "..."
 
-# --- NEW: Load/save emergency emails ---
-def load_emergency_emails():
-    global emergency_emails
-    try:
-        if os.path.exists(EMERGENCY_FILE):
-            with open(EMERGENCY_FILE, "r") as f:
-                data = json.load(f)
-                emergency_emails = data.get("emails", []) if isinstance(data, dict) else []
-                print_with_counter(f"Loaded {len(emergency_emails)} emergency email(s)")
-        else:
-            emergency_emails = []
-    except Exception as e:
-        print_with_counter(f"Error loading emergency emails: {e}")
-        emergency_emails = []
-
-def save_emergency_emails():
-    try:
-        payload = {
-            "emails": emergency_emails,
-            "last_updated": datetime.now().isoformat()
-        }
-        with open(EMERGENCY_FILE, "w") as f:
-            json.dump(payload, f, indent=2)
-        print_with_counter(f"Saved {len(emergency_emails)} emergency email(s)")
-    except Exception as e:
-        print_with_counter(f"Error saving emergency emails: {e}")
-
-def add_emergency_email(email: str):
-    global emergency_emails
-    email = email.strip()
-    if email not in emergency_emails:
-        emergency_emails.append(email)
-        save_emergency_emails()
-        print_with_counter(f"Added emergency email: {email}")
-        return True
-    else:
-        print_with_counter(f"Email already exists: {email}")
-        return False
-
-def remove_emergency_email(email: str):
-    global emergency_emails
-    email = email.strip()
-    if email in emergency_emails:
-        emergency_emails.remove(email)
-        save_emergency_emails()
-        print_with_counter(f"Removed emergency email: {email}")
-        return True
-    return False
-# -----------------------------------------------
-
 def handle_mouse_click(event, x, y, flags, param):
     global current_threshold, input_mode, input_text, naming_mode, name_input
     global threshold_menu_open, edit_mode, edit_threshold_name, edit_input
     global current_threshold_name, recently_used
-    global email_mode, email_input, emergency_emails
 
     if event != cv2.EVENT_LBUTTONDOWN:
         return
@@ -566,7 +591,7 @@ def handle_mouse_click(event, x, y, flags, param):
         return
 
     # Check if any button was clicked when menus are not open
-    if not input_mode and not naming_mode and not email_mode:
+    if not input_mode and not naming_mode:
         # Check increase button
         inc_btn = param['inc_btn']
         if inc_btn[0] <= x <= inc_btn[2] and inc_btn[1] <= y <= inc_btn[3]:
@@ -605,23 +630,14 @@ def handle_mouse_click(event, x, y, flags, param):
             threshold_menu_open = True
             print_with_counter("Opening threshold selection menu")
             return
-
-        # --- NEW: Check emergency email button ---
-        email_btn = param.get('email_btn')
-        if email_btn and email_btn[0] <= x <= email_btn[2] and email_btn[1] <= y <= email_btn[3]:
-            email_mode = True
-            email_input = ""
-            print_with_counter("Emergency email input mode: active")
-            return
-        # -----------------------------------------------
+    # -----------------------------------------------
 
 # ...existing code...
 
 def handle_keyboard_input(key):
-    """Handle keyboard input for custom threshold, naming, editing, and emails"""
+    """Handle keyboard input for custom threshold, naming, and editing"""
     global input_text, input_mode, current_threshold, naming_mode, name_input
     global threshold_menu_open, edit_mode, edit_input, edit_threshold_name
-    global email_mode, email_input, emergency_emails
     
     # Close threshold menu with Escape
     if threshold_menu_open and key == 27:
@@ -695,7 +711,7 @@ def handle_keyboard_input(key):
                 save_current_threshold(name_input.strip())
             else:
                 print_with_counter("Name cannot be empty. Cancelled.")
-            
+        
             naming_mode = False
             name_input = ""
             return
@@ -714,40 +730,8 @@ def handle_keyboard_input(key):
             name_input += chr(key)
             return
 
-    # --- NEW: Process emergency email input mode ---
-    if email_mode:
-        # Confirm with Enter
-        if key == 13:
-            candidate = email_input.strip()
-            if "@" in candidate and "." in candidate and len(candidate) > 5:
-                if add_emergency_email(candidate):
-                    email_input = ""
-                    print_with_counter("Email added! Press Enter again to add more, Esc to finish")
-                else:
-                    email_input = ""
-                    print_with_counter("Email already exists. Try another one")
-            else:
-                print_with_counter("Invalid email format. Use example@domain.com")
-                email_input = ""
-            return
-
-        # Backspace
-        if key == 8:
-            email_input = email_input[:-1]
-            return
-
-        # Escape to finish
-        if key == 27:
-            email_mode = False
-            email_input = ""
-            print_with_counter(f"Email input finished. Total emails: {len(emergency_emails)}")
-            return
-
-        # Accept printable characters
-        if 32 <= key <= 126 and len(email_input) < 64:
-            email_input += chr(key)
-            return
-    # -----------------------------------------------
+    # --- REMOVED: emergency email input handling (email_mode) ---
+# -----------------------------------------------
 
 def update_sleep_percentage(state):
     """Update sleep percentage based on current state"""
@@ -826,19 +810,35 @@ def init_arduino():
         print_with_counter(f"Could not open serial port {ARDUINO_PORT}: {e}")
 
 def send_to_arduino(code: str):
-    """Send a short code to Arduino (adds newline). Non-blocking caller recommended."""
+    """Send a short code to Arduino (adds newline). Silent on success/failure."""
     global _serial_conn
     if _serial_conn is None:
-        # silently ignore if no connection
         return False
     try:
         if not _serial_conn.is_open:
             _serial_conn.open()
-        _serial_conn.write((code.strip() + "\n").encode('utf-8'))
+        payload = (code.strip() + "\n").encode('utf-8')
+        _serial_conn.write(payload)
+        _serial_conn.flush()
         return True
-    except Exception as e:
-        print_with_counter(f"Arduino send failed: {e}")
+    except Exception:
         return False
+# ---------------------------------------
+
+# --- NEW: Arduino periodic sender ---
+def arduino_periodic_sender(interval=ARDUINO_SEND_INTERVAL):
+    """Thread loop: read JSON and send letter + '+' + percentage every `interval` seconds. Silent operation."""
+    global arduino_sender_running
+    while arduino_sender_running:
+        try:
+            letter, pct = _read_sleep_from_json()
+            if letter is not None:
+                code = f"{letter}+{pct}"
+                # silent send
+                send_to_arduino(code)
+        except Exception:
+            pass
+        time.sleep(interval)
 # ---------------------------------------
 
 def main():
@@ -849,9 +849,6 @@ def main():
 
     # Load saved thresholds
     load_thresholds()
-    # --- NEW: Load emergency emails ---
-    load_emergency_emails()
-    # --------------------------------
     
     # Initialize webcam
     video_capture = cv2.VideoCapture(0)
@@ -866,16 +863,20 @@ def main():
     print_with_counter("- Terminal will auto-clear after 50 messages")
     print_with_counter("- Press 'q' to quit the application")
     print_with_counter(f"- Loaded {len(saved_thresholds)} saved thresholds")
-    print_with_counter(f"- Loaded {len(emergency_emails)} emergency email(s)")
 
     # Create named window and set mouse callback
     cv2.namedWindow('Real-Time Eye State Detection')
     button_params = {'inc_btn': None, 'dec_btn': None, 'input_btn': None, 
-                   'save_btn': None, 'load_btn': None, 'menu_buttons': [], 'email_btn': None}
+                   'save_btn': None, 'load_btn': None, 'menu_buttons': []}
     cv2.setMouseCallback('Real-Time Eye State Detection', handle_mouse_click, button_params)
 
     # Initialize Arduino serial (non-fatal)
     init_arduino()
+
+    # Start periodic Arduino sender (every 3 seconds)
+    global arduino_sender_running
+    arduino_sender_running = True
+    threading.Thread(target=arduino_periodic_sender, daemon=True).start()
 
     # Add these globals if not already present
     global input_text, input_counter, input_mode, naming_mode, name_input, name_counter
@@ -883,7 +884,6 @@ def main():
     global sleep, drowsy, active, status, color, box_color
     global blink_duration, total_blinks, last_blink_time, blink_frequency
     global microsleep_counter, session_start_time, head_pose_angles
-    global email_mode, email_input, email_counter
     edit_mode = False
     edit_threshold_name = ""
     edit_input = ""
@@ -917,16 +917,12 @@ def main():
             input_btn = draw_button(frame, "Custom", (190, frame.shape[0] - 50), btn_width, btn_height)
             save_btn = draw_button(frame, "Save", (280, frame.shape[0] - 50), btn_width, btn_height)
             load_btn = draw_button(frame, "Load", (370, frame.shape[0] - 50), btn_width, btn_height)
-            # --- NEW: Email button ---
-            email_btn = draw_button(frame, "Email", (460, frame.shape[0] - 50), btn_width, btn_height)
-            # ---------------------------
 
             button_params['inc_btn'] = inc_btn
             button_params['dec_btn'] = dec_btn
             button_params['input_btn'] = input_btn
             button_params['save_btn'] = save_btn
             button_params['load_btn'] = load_btn
-            button_params['email_btn'] = email_btn
             
             # Re-register callback each frame to ensure updated params
             cv2.setMouseCallback('Real-Time Eye State Detection', handle_mouse_click, button_params)
@@ -1021,41 +1017,6 @@ def main():
                           (frame.shape[1]//2 - 140, frame.shape[0]//2 + 50), 
                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
-            # --- NEW: Draw email input field if active ---
-            elif email_mode:
-                overlay = frame.copy()
-                cv2.rectangle(overlay, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 0), -1)
-                cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
-                
-                cv2.rectangle(frame, (frame.shape[1]//2 - 220, frame.shape[0]//2 - 80),
-                             (frame.shape[1]//2 + 220, frame.shape[0]//2 + 80),
-                             (255, 255, 255), -1)
-                cv2.rectangle(frame, (frame.shape[1]//2 - 220, frame.shape[0]//2 - 80),
-                             (frame.shape[1]//2 + 220, frame.shape[0]//2 + 80),
-                             (0, 0, 0), 2)
-                
-                cv2.putText(frame, "Enter emergency email:",
-                            (frame.shape[1]//2 - 180, frame.shape[0]//2 - 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                
-                display_email = email_input
-                email_counter = (email_counter + 1) % 30
-                if email_counter < 15:
-                    display_email += "|"
-                
-                cv2.putText(frame, display_email,
-                            (frame.shape[1]//2 - 200, frame.shape[0]//2 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-                
-                cv2.putText(frame, f"Total: {len(emergency_emails)} email(s)",
-                            (frame.shape[1]//2 - 200, frame.shape[0]//2 + 20),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (50, 50, 50), 1)
-                
-                cv2.putText(frame, "Enter to add, Esc to finish",
-                            (frame.shape[1]//2 - 180, frame.shape[0]//2 + 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-            # -----------------------------------------------
-            
             # Draw threshold selection menu if open
             elif threshold_menu_open:
                 menu_buttons = draw_threshold_menu(frame)
@@ -1068,13 +1029,6 @@ def main():
             cv2.putText(frame, threshold_text, 
                       (10, frame.shape[0] - 60), cv2.FONT_HERSHEY_SIMPLEX, 
                       0.6, (0, 0, 0), 2)
-            
-            # --- NEW: Display emergency emails on screen ---
-            email_display = f"{len(emergency_emails)} email(s)"
-            cv2.putText(frame, f"Emergency E-Mails: {email_display}",
-                      (10, frame.shape[0] - 90), cv2.FONT_HERSHEY_SIMPLEX,
-                      0.5, (0, 0, 0), 1)
-            # -----------------------------------------------
             
             # Display sleepiness percentage
             percentage_color = (0, 255, 0) if sleep_percentage < 30 else (0, 165, 255) if sleep_percentage < 60 else (0, 0, 255)
@@ -1218,6 +1172,9 @@ def main():
                 break
 
     finally:
+        # stop periodic sender
+        arduino_sender_running = False
+        
         # Finalize state history
         if current_state is not None:
             current_time = datetime.now()
