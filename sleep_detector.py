@@ -9,6 +9,17 @@ import time
 from datetime import datetime
 from collections import deque
 
+# NEW: pyserial (optional) — falls back if not installed
+try:
+    import serial  # pip install pyserial
+except Exception:
+    serial = None
+
+# Serial connection vars
+_serial_conn = None
+ARDUINO_PORT = "COM3"     # <- change to your COM port
+ARDUINO_BAUD = 115200
+
 # Initialize MediaPipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(
@@ -401,56 +412,56 @@ def draw_threshold_menu(frame):
     menu_width = 300
     menu_x = (frame.shape[1] - menu_width) // 2
     menu_y = (frame.shape[0] - menu_height) // 2
-    
+
     # Semi-transparent overlay
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
-    
+
     # Menu background
     cv2.rectangle(frame, (menu_x, menu_y), (menu_x + menu_width, menu_y + menu_height), (240, 240, 240), -1)
     cv2.rectangle(frame, (menu_x, menu_y), (menu_x + menu_width, menu_y + menu_height), (0, 0, 0), 2)
-    
+
     # Title
-    cv2.putText(frame, "Saved Thresholds", (menu_x + 50, menu_y + 30), 
+    cv2.putText(frame, "Saved Thresholds", (menu_x + 50, menu_y + 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-    
+
     # List of thresholds with buttons
     buttons = []
     y_offset = menu_y + 60
-    
+
     # Sort thresholds by most recently used
-    sorted_thresholds = sorted(saved_thresholds, 
-                             key=lambda x: x.get('last_used', '1970-01-01'), 
-                             reverse=True)
-    
+    sorted_thresholds = sorted(saved_thresholds,
+                               key=lambda x: x.get('last_used', '1970-01-01'),
+                               reverse=True)
+
     for t in sorted_thresholds:
-        # FIXED: Convert value to float before formatting
-        btn = draw_button(frame, f"{t['name']}: {float(t['value']):.2f}", 
-                         (menu_x + 10, y_offset), menu_width - 100, 30, 
-                         color=(240, 240, 240))  # Define bg_color as a light gray color
+        # Draw main threshold button (fixed: closed parenthesis)
+        btn = draw_button(frame, f"{t['name']}: {float(t['value']):.2f}",
+                          (menu_x + 10, y_offset), menu_width - 100, 30,
+                          color=(240, 240, 240))
         buttons.append(('threshold', t, btn))
-        
+
         # Add Edit button
-        edit_btn = draw_button(frame, "Edit", 
-                             (menu_x + menu_width - 80, y_offset), 30, 30, 
-                             color=(255, 200, 200))
+        edit_btn = draw_button(frame, "Edit",
+                               (menu_x + menu_width - 80, y_offset), 30, 30,
+                               color=(255, 200, 200))
         buttons.append(('edit', t, edit_btn))
-        
+
         # Add Delete button
-        del_btn = draw_button(frame, "Del", 
-                            (menu_x + menu_width - 40, y_offset), 30, 30, 
-                            color=(200, 200, 255))
+        del_btn = draw_button(frame, "Del",
+                              (menu_x + menu_width - 40, y_offset), 30, 30,
+                              color=(200, 200, 255))
         buttons.append(('delete', t, del_btn))
-        
+
         y_offset += 50
-    
+
     # Close button
-    close_btn = draw_button(frame, "Close", 
-                          (menu_x + menu_width//2 - 40, menu_y + menu_height - 40), 
-                          80, 30, color=(200, 200, 200))
+    close_btn = draw_button(frame, "Close",
+                            (menu_x + menu_width//2 - 40, menu_y + menu_height - 40),
+                            80, 30, color=(200, 200, 200))
     buttons.append(('close', None, close_btn))
-    
+
     return buttons
 
 def truncate_text(text, max_length):
@@ -801,6 +812,35 @@ def calculate_blink_rate():
         blink_frequency = 0
     return blink_frequency
 
+# --- NEW: Arduino helper functions ---
+def init_arduino():
+    global _serial_conn, serial
+    if serial is None:
+        print_with_counter("pyserial not installed — Arduino disabled")
+        return
+    try:
+        _serial_conn = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=1)
+        print_with_counter(f"Opened serial to Arduino on {ARDUINO_PORT}@{ARDUINO_BAUD}")
+    except Exception as e:
+        _serial_conn = None
+        print_with_counter(f"Could not open serial port {ARDUINO_PORT}: {e}")
+
+def send_to_arduino(code: str):
+    """Send a short code to Arduino (adds newline). Non-blocking caller recommended."""
+    global _serial_conn
+    if _serial_conn is None:
+        # silently ignore if no connection
+        return False
+    try:
+        if not _serial_conn.is_open:
+            _serial_conn.open()
+        _serial_conn.write((code.strip() + "\n").encode('utf-8'))
+        return True
+    except Exception as e:
+        print_with_counter(f"Arduino send failed: {e}")
+        return False
+# ---------------------------------------
+
 def main():
 
     if not os.path.exists(JSON_FILE_PATH):
@@ -833,6 +873,9 @@ def main():
     button_params = {'inc_btn': None, 'dec_btn': None, 'input_btn': None, 
                    'save_btn': None, 'load_btn': None, 'menu_buttons': [], 'email_btn': None}
     cv2.setMouseCallback('Real-Time Eye State Detection', handle_mouse_click, button_params)
+
+    # Initialize Arduino serial (non-fatal)
+    init_arduino()
 
     # Add these globals if not already present
     global input_text, input_counter, input_mode, naming_mode, name_input, name_counter
@@ -1127,6 +1170,13 @@ def main():
                     if status and old_status != status:
                         print_with_counter(f"Status changed to: {status} (EAR: {ear:.2f})")
                         update_state_history(status)
+
+                        # --- NEW: send single-letter code to Arduino ---
+                        status_map = {"SLEEPING !!!": "s", "Drowsy !": "d", "Active :)": "a"}
+                        code = status_map.get(status)
+                        if code:
+                            threading.Thread(target=send_to_arduino, args=(code,), daemon=True).start()
+                        # ---------------------------------------------------
 
                     # Update sleep percentage
                     update_sleep_percentage(status)
@@ -1631,6 +1681,14 @@ def main():
 </html>
 """)
         
+        # Close serial if open
+        try:
+            if _serial_conn:
+                _serial_conn.close()
+                print_with_counter("Closed Arduino serial connection")
+        except Exception:
+            pass
+
         # Clean up
         video_capture.release()
         cv2.destroyAllWindows()
