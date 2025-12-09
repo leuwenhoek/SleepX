@@ -16,6 +16,7 @@ unsigned long previousMillis = 0;
 const long blinkInterval = 500;
 bool ledState = false;
 bool sleepingMode = false;
+bool drowsyMode = false; // NEW: keep buzzing while true
 
 String currentState = "ACTIVE";
 int currentPercentage = 100;
@@ -61,6 +62,9 @@ void loop() {
       digitalWrite(LED2_PIN, ledState);
     }
   }
+
+  // If in drowsyMode keep buzzer on (tone already set in handlerDrowsy).
+  // No additional code required here unless you want a flashing LED while drowsy.
 }
 
 void parseCommand(String cmd) {
@@ -130,7 +134,7 @@ void updateDisplay() {
   display.setTextSize(2);
   int16_t x2, y2;
   uint16_t w2, h2;
-  display.getTextBounds(perc, 0, 0, &x2, y2, &w2, &h2);
+  display.getTextBounds(perc, 0, 0, &x2, &y2, &w2, &h2);
   display.setCursor((SCREEN_WIDTH - w2) / 2, 18);
   display.print(perc);
 
@@ -139,6 +143,7 @@ void updateDisplay() {
 
 void handleActive() {
   sleepingMode = false;
+  drowsyMode = false; // stop drowsy buzzing
   steeringServo.write(0);
   digitalWrite(LED1_PIN, LOW);
   digitalWrite(LED2_PIN, LOW);
@@ -150,6 +155,7 @@ void handleActive() {
 
 void handleSleeping() {
   sleepingMode = true;
+  drowsyMode = false; // ensure drowsy buzzer is off
   steeringServo.write(90);
   tone(BUZZER_PIN, 2000);
 
@@ -159,16 +165,13 @@ void handleSleeping() {
 
 void handleDrowsy() {
   sleepingMode = false;
+  drowsyMode = true;          // start persistent drowsy mode
   steeringServo.write(0);
   digitalWrite(LED1_PIN, LOW);
   digitalWrite(LED2_PIN, LOW);
 
-  for (int i = 0; i < 3; i++) {
-    tone(BUZZER_PIN, 1000);
-    delay(150);
-    noTone(BUZZER_PIN);
-    delay(100);
-  }
+  // Start continuous buzzer for drowsy and keep it until another state changes it
+  tone(BUZZER_PIN, 1000);     // continuous tone at 1kHz
 
   currentState = "DROWSY";
   updateDisplay();
